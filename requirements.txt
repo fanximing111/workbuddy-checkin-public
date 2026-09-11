@@ -1,0 +1,6 @@
+# WorkBuddy 每日自动签到 · GitHub Actions 版
+# 仅使用 Python 标准库，无需任何第三方依赖。
+# workflow 中会执行 `python scripts/workbuddy_checkin.py`，因此这里保持为空说明。
+#
+# 如果将来引入了第三方依赖，在此逐行列出，例如：
+# requests==2.32.3

@@ -1,0 +1,20 @@
+# 忽略本地运行产生的临时文件与可能的密钥文件
+__pycache__/
+*.pyc
+*.pyo
+
+# 运行产物（可能含接口响应，不入库）
+checkin.log
+result.json
+
+# 含密钥的配置文件 —— 绝对不要提交
+notify_config.json
+notify_config.json.example
+*.local
+*.secret
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

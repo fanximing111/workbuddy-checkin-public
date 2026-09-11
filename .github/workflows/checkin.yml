@@ -1,0 +1,106 @@
+name: WorkBuddy 每日自动签到
+
+# ─────────────────────────────────────────────────────────────
+#  WorkBuddy「Buddy 加油站」每日签到 · GitHub Actions 版
+#  原理：从仓库 Secrets 读取 accessToken，直接调用官方签到接口
+#       （接口直签，无需 GUI，无需本机常驻）
+# ─────────────────────────────────────────────────────────────
+
+on:
+  schedule:
+    # GitHub Actions 使用 UTC 时间；北京时间 09:00 = UTC 01:00
+    # ⚠️ 定时任务在整点前后可能有数分钟~数十分钟延迟，属 GitHub 正常现象
+    - cron: '0 1 * * *'
+  # 支持在 Actions 页面手动触发（首次配置后建议先手动跑一次验证）
+  workflow_dispatch:
+    inputs:
+      check_only:
+        description: '仅查询状态，不执行领取'
+        required: false
+        default: false
+        type: boolean
+
+# 同一时间只保留一个运行实例，避免并发重复领取
+concurrency:
+  group: workbuddy-checkin
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  checkin:
+    name: 执行签到
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      # 从 Secrets 注入凭据（脚本会自动识别 WORKBUDDY_ACCESS_TOKEN）
+      WORKBUDDY_ACCESS_TOKEN: ${{ secrets.WORKBUDDY_ACCESS_TOKEN }}
+      WORKBUDDY_DOMAIN: ${{ secrets.WORKBUDDY_DOMAIN }}
+      # 通知通道（可选，任一为空则跳过该通道）
+      WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+      PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+      BARK_URL: ${{ secrets.BARK_URL }}
+      SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
+      # 签到成功是否也推送播报（可选，默认仅失败提醒）
+      SUCCESS_NOTIFY: ${{ secrets.SUCCESS_NOTIFY }}
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 检查凭据是否已配置
+        id: guard
+        run: |
+          if [ -z "$WORKBUDDY_ACCESS_TOKEN" ]; then
+            echo "::error::未配置 Secret「WORKBUDDY_ACCESS_TOKEN」。请在仓库 Settings → Secrets and variables → Actions 中添加。"
+            exit 1
+          fi
+          # 只输出存在性结论，不输出 token 长度 / 内容 / 片段（长度也是可用于指纹识别的信息）
+          echo "✓ 凭据已配置（token 存在，内容不外显）"
+          echo "✓ 接口域名：${WORKBUDDY_DOMAIN:-（默认 www.codebuddy.cn）}"
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 生成推送配置（可选）
+        # 仅在配置了任一通知通道时生效；未配置则静默跳过
+        run: |
+          python scripts/gen_notify_config.py "$HOME/.workbuddy/scripts/notify_config.json"
+
+      - name: 环境自检（只读）
+        run: python scripts/workbuddy_checkin.py --diagnose
+
+      - name: 执行签到
+        id: checkin
+        # 手动触发且勾选「仅查询」时不执行领取
+        run: |
+          ARGS=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.check_only }}" = "true" ]; then
+            ARGS="--check-only"
+          fi
+          # 注意：脚本用非 0 退出码表示签到失败。
+          # 管道会吞掉退出码（$? 变成 tee 的），因此这里用 PIPESTATUS 精确取 Python 的退出码，
+          # 否则签到失败也会被判为 success，导致失败告警失效。
+          set +e
+          python scripts/workbuddy_checkin.py $ARGS | tee result.json
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "checkin_exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      - name: 输出运行摘要
+        if: always()
+        # 只输出白名单字段，不把完整 result.json 写入摘要
+        # （摘要会长期留存于 Actions 页面，应避免暴露原始接口响应全文）
+        run: |
+          python scripts/summarize_result.py result.json >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 失败时终止任务（触发 GitHub 失败通知）
+        if: steps.checkin.outcome != 'success'
+        run: |
+          echo "::error::签到未成功（退出码 ${{ steps.checkin.outputs.checkin_exit_code }}），请查看上方日志与运行摘要"
+          exit 1

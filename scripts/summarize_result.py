@@ -72,8 +72,28 @@ def build_summary(data):
 
     detail = data.get("detail") or {}
     for key in ALLOWED_DETAIL:
-        if key in detail and detail[key] is not None:
+        if key in detail and detail[key] is not None and key != "accounts":
             lines.append("| %s | %s |" % (key, _safe(detail[key])))
+
+    # 多账号模式：输出每个账号的签到明细表（字段均为非敏感结论，已由主脚本过滤）
+    if detail.get("multi") and isinstance(detail.get("accounts"), list):
+        lines.append("")
+        lines.append("### 账号明细（共 %s 个：成功 %s / 失败 %s）"
+                     % (detail.get("total", "?"), detail.get("ok", "?"),
+                        detail.get("failed", "?")))
+        lines.append("")
+        lines.append("| # | 账号 | 结果 | 说明 |")
+        lines.append("|---|---|---|---|")
+        for acc in detail["accounts"]:
+            if not isinstance(acc, dict):
+                continue
+            st = acc.get("status")
+            lines.append("| %s | %s | %s | %s |" % (
+                acc.get("index", "-"),
+                _safe(str(acc.get("name", "-"))),
+                "✅ 成功" if st == "ok" else "❌ 失败",
+                _safe(str(acc.get("msg", "")))))
+        lines.append("")
 
     lines.append("")
     if status == "error":

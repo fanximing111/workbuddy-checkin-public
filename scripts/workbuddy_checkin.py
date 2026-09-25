@@ -49,6 +49,7 @@ if sys.version_info < (3, 6):
 
 import json
 import os
+import random
 import socket
 import subprocess
 import sys
@@ -117,6 +118,66 @@ def _env_token():
     # 容错：允许传入带协议前缀的域名
     domain = domain.replace("https://", "").replace("http://", "").strip("/")
     return token, domain
+
+
+def _accounts_from_env():
+    """从环境变量 WORKBUDDY_TOKENS 读取多账号列表（用于 GitHub Actions 批量签到）。
+
+    支持三种写法（推荐 JSON 数组，可由 scripts/build_tokens_json.py 生成）：
+      1. JSON 数组，元素为 token 字符串：["token1", "token2"]
+      2. JSON 数组，元素为对象：[{"name": "主号", "token": "...", "domain": "..."}, ...]
+      3. 纯文本按行分隔（每行一个 token，可选 "名称:" 前缀）
+
+    返回：
+      - None   未设置 WORKBUDDY_TOKENS（走原有单账号流程）
+      - []     已设置但解析后没有任何有效账号（调用方应报错）
+      - [{name, token, domain}, ...]
+    """
+    raw = (os.environ.get("WORKBUDDY_TOKENS") or "").strip()
+    if not raw:
+        return None
+    accounts = []
+
+    def _norm_name(i, name):
+        return (str(name or "").strip() or "account%d" % (i + 1))
+
+    def _clean_domain(d):
+        d = str(d or "").replace("https://", "").replace("http://", "").strip("/")
+        return d or None
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        # 兜底：按行解析，支持 "名称:token" / 纯 token 两种行格式
+        lines = [l.strip() for l in raw.replace("\r", "").split("\n") if l.strip()]
+        for i, line in enumerate(lines):
+            if ":" in line and not line.startswith("{"):
+                name, _, tok = line.partition(":")
+                accounts.append({"name": _norm_name(i, name),
+                                 "token": tok.strip(), "domain": None})
+            else:
+                accounts.append({"name": _norm_name(i, None),
+                                 "token": line, "domain": None})
+        return [a for a in accounts if a["token"]]
+
+    items = []
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        inner = data.get("accounts")
+        items = inner if isinstance(inner, list) else [data]
+
+    for i, item in enumerate(items):
+        if isinstance(item, str) and item.strip():
+            accounts.append({"name": _norm_name(i, None),
+                             "token": item.strip(), "domain": None})
+        elif isinstance(item, dict) and str(item.get("token", "")).strip():
+            accounts.append({
+                "name": _norm_name(i, item.get("name")),
+                "token": str(item.get("token")).strip(),
+                "domain": _clean_domain(item.get("domain")),
+            })
+    return accounts
 
 
 def _check_expiry(auth):
@@ -468,36 +529,54 @@ def _win_toast(title, body):
 
 # ---------------- 主流程 ----------------
 
-def run(check_only):
+def run(check_only, token=None, domain=None, label=None):
+    """执行一次签到流程。
+
+    多账号模式：调用方显式传入 token（可选 domain / label）时，跳过环境变量与
+    本机登录态文件，直接使用该凭据；单账号模式行为与原版完全一致。
+    """
     result = {"status": "unknown", "action": None, "points": None,
               "balance": None, "msg": "", "detail": {}}
 
     auth_path = None
-    # 1) 优先从环境变量读取（CI / GitHub Actions 等无登录态文件的场景）
-    env_token, env_domain = _env_token()
-    if env_token:
-        token, domain = env_token, env_domain
-        result["detail"]["auth_source"] = "env"
-        result["detail"]["domain"] = domain
-        result["detail"]["auth_file"] = "(env: WORKBUDDY_ACCESS_TOKEN)"
+    # 0) 多账号模式：显式传入 token（来自 WORKBUDDY_TOKENS 解析结果）
+    if token:
+        result["detail"]["auth_source"] = "multi"
+        result["detail"]["account_name"] = label or mask_token(token)
+        result["detail"]["auth_file"] = "(multi: %s)" % result["detail"]["account_name"]
         result["detail"]["token_masked"] = mask_token(token)
+        if not domain:
+            domain = (os.environ.get("WORKBUDDY_DOMAIN")
+                      or os.environ.get("WORKBUDDY_AUTH_DOMAIN") or "").strip() \
+                     or "www.codebuddy.cn"
+            domain = domain.replace("https://", "").replace("http://", "").strip("/")
+        result["detail"]["domain"] = domain
     else:
-        # 2) 回退到本机登录态文件
-        auth_path = find_auth_file()
-        if not auth_path:
-            result.update(status="error",
-                          msg="未找到本机登录态文件，也未设置 WORKBUDDY_ACCESS_TOKEN 环境变量")
-            return result
-        try:
-            token, domain = load_token(auth_path)
-        except Exception as e:
-            result.update(status="error", msg="读取登录态失败: %s" % e)
-            return result
-        result["detail"]["auth_source"] = "file"
-        result["detail"]["domain"] = domain
-        result["detail"]["auth_file"] = auth_path
-        # 仅记录 token 形态，绝不记录真实值
-        result["detail"]["token_masked"] = mask_token(token)
+        # 1) 优先从环境变量读取（CI / GitHub Actions 等无登录态文件的场景）
+        env_token, env_domain = _env_token()
+        if env_token:
+            token, domain = env_token, env_domain
+            result["detail"]["auth_source"] = "env"
+            result["detail"]["domain"] = domain
+            result["detail"]["auth_file"] = "(env: WORKBUDDY_ACCESS_TOKEN)"
+            result["detail"]["token_masked"] = mask_token(token)
+        else:
+            # 2) 回退到本机登录态文件
+            auth_path = find_auth_file()
+            if not auth_path:
+                result.update(status="error",
+                              msg="未找到本机登录态文件，也未设置 WORKBUDDY_ACCESS_TOKEN 环境变量")
+                return result
+            try:
+                token, domain = load_token(auth_path)
+            except Exception as e:
+                result.update(status="error", msg="读取登录态失败: %s" % e)
+                return result
+            result["detail"]["auth_source"] = "file"
+            result["detail"]["domain"] = domain
+            result["detail"]["auth_file"] = auth_path
+            # 仅记录 token 形态，绝不记录真实值
+            result["detail"]["token_masked"] = mask_token(token)
 
     base = "https://%s/v2" % domain
 
@@ -607,6 +686,92 @@ def write_log(res):
             f.write(line)
     except Exception:
         pass  # 写日志失败绝不影响签到
+
+
+# ---------------- 多账号批量 ----------------
+
+MULTI_SLEEP_RANGE = (3, 10)  # 账号间随机间隔秒数（降低批量请求特征）
+
+
+def run_multi(check_only, accounts):
+    """依次对多个账号执行签到；账号之间加随机间隔，避免固定节律的批量请求。
+
+    返回 (汇总结果 agg, 明细列表 results)。汇总结果不含任何 token，可安全输出。
+    """
+    results = []
+    for i, acc in enumerate(accounts):
+        if i > 0:
+            time.sleep(random.uniform(MULTI_SLEEP_RANGE[0], MULTI_SLEEP_RANGE[1]))
+        res = run(check_only, token=acc.get("token"),
+                  domain=acc.get("domain"), label=acc.get("name"))
+        res["detail"]["account_name"] = acc.get("name") or ("account%d" % (i + 1))
+        res["detail"]["index"] = i + 1
+        results.append(res)
+        write_log(res)  # 每个账号单独留痕，便于排查
+
+    total = len(results)
+    ok_list = [r for r in results if r.get("status") == "ok"]
+    bad_list = [r for r in results if r.get("status") != "ok"]
+    signed_new = sum(1 for r in ok_list if r.get("action") == "clicked")
+    already = sum(1 for r in ok_list if r.get("action") == "skip_already_signed")
+    summary = ("多账号签到完成：共 %d 个账号，成功 %d（新签 %d / 已签跳过 %d），失败 %d"
+               % (total, len(ok_list), signed_new, already, len(bad_list)))
+    agg = {
+        "status": "ok" if not bad_list else "error",
+        "action": "multi",
+        "points": None,
+        "balance": None,
+        "msg": summary,
+        "detail": {
+            "multi": True,
+            "total": total,
+            "ok": len(ok_list),
+            "failed": len(bad_list),
+            "accounts": [
+                {"index": r["detail"].get("index"),
+                 "name": r["detail"].get("account_name"),
+                 "status": r.get("status"),
+                 "action": r.get("action"),
+                 "msg": r.get("msg"),
+                 "balance": r.get("balance")}
+                for r in results
+            ],
+        },
+    }
+    return agg, results
+
+
+def notify_multi(agg, results):
+    """多账号模式推送：任一账号失败必推；全部成功仅当 success_notify=true 时推。
+
+    内容只含账号名（或脱敏 token 形态）与签到结论，不含任何凭据。
+    """
+    cfg = load_notify_config()
+    if not cfg or cfg.get("enabled") is False:
+        return
+    any_fail = agg.get("status") != "ok"
+    if not any_fail and not cfg.get("success_notify"):
+        return
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    title = ("⚠️ WorkBuddy 多账号签到 · 有失败" if any_fail
+             else "✅ WorkBuddy 多账号签到 · 全部成功")
+    lines = [
+        "### %s" % title,
+        "",
+        "> **时间**：%s" % now,
+        "> **汇总**：%s" % agg.get("msg", ""),
+        "",
+        "| 账号 | 结果 | 说明 |",
+        "|---|---|---|",
+    ]
+    for r in results:
+        mark = "✅" if r.get("status") == "ok" else "❌"
+        lines.append("| %s %s | %s | %s |" % (
+            mark, r["detail"].get("account_name"),
+            "成功" if r.get("status") == "ok" else "失败",
+            r.get("msg", "")))
+    content = "\n".join(lines) + "\n"
+    agg["detail"]["notify"] = _dispatch_channels(cfg, title, content)
 
 
 # ---------------- 环境自检与配置模板 ----------------
@@ -744,7 +909,11 @@ USAGE = (
     "  python workbuddy_checkin.py --version      # 显示版本号\n\n"
     "退出码：成功 0 / 失败 1（便于自动化判断是否推送告警）\n"
     "签到成功后会在结果中展示当前积分余额（若接口返回 balance / total_credit 等字段）。\n"
-    "微信推送开关见 ~/.workbuddy/scripts/notify_config.json 的 \"success_notify\" 字段。\n"
+    "微信推送开关见 ~/.workbuddy/scripts/notify_config.json 的 \"success_notify\" 字段。\n\n"
+    "多账号批量：设置环境变量 WORKBUDDY_TOKENS 后自动切换为批量模式，\n"
+    "  值为 JSON 数组（推荐用 scripts/build_tokens_json.py 生成），例如：\n"
+    '  [{"name": "主号", "token": "..."}, {"name": "小号", "token": "..."}]\n'
+    "  逐个账号签到，账号间随机间隔 3~10 秒，任一失败退出码为 1。\n"
 )
 
 
@@ -768,6 +937,39 @@ def main():
         sys.exit(0)
     check_only = "--check-only" in sys.argv
     no_notify = "--no-notify" in sys.argv
+
+    # 多账号批量模式：设置了 WORKBUDDY_TOKENS 时走批量流程（None = 未设置，走单账号）
+    accounts = _accounts_from_env()
+    if accounts is not None:
+        if not accounts:
+            res = {"status": "error", "action": None, "points": None,
+                   "msg": ("WORKBUDDY_TOKENS 已设置但未解析到任何有效账号"
+                           "（应为 JSON 数组，元素为 token 字符串或 {name, token, domain} 对象）"),
+                   "detail": {"multi": True}}
+            if not no_notify:
+                try:
+                    notify_failure(res)
+                except Exception:
+                    pass
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+            write_log(res)
+            sys.exit(1)
+        try:
+            agg, results = run_multi(check_only, accounts)
+        except Exception as e:
+            agg = {"status": "error", "action": "multi", "points": None,
+                   "msg": "多账号流程未捕获异常: %s" % e, "detail": {"multi": True}}
+            results = []
+        if not no_notify:
+            try:
+                notify_multi(agg, results)
+            except Exception:
+                pass  # 推送失败不影响签到结果与退出码
+        print(json.dumps(agg, ensure_ascii=False, indent=2))
+        write_log(agg)
+        # 全部账号成功才算成功（任一失败返回非 0，触发 GitHub 失败通知）
+        sys.exit(0 if agg.get("status") == "ok" else 1)
+
     try:
         res = run(check_only)
     except Exception as e:

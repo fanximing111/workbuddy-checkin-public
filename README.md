@@ -102,6 +102,45 @@ python scripts/sync_token_to_github.py --repo <用户名>/<仓库名>
 到仓库 **Actions** 页面 → 选择「WorkBuddy 每日自动签到」→ **Run workflow**。
 首次建议勾选 `check_only`（仅查询，不领取）确认接口联通，再跑一次真实签到。看到 `status: ok` 即配置成功。
 
+## 多账号批量签到（推荐）
+
+有多个 WorkBuddy 账号时，把所有 token 放进一个 Secret `WORKBUDDY_TOKENS` 即可批量签到：脚本逐个账号签到、账号间随机间隔 3~10 秒，运行摘要展示每个账号的结果明细，**任一账号失败则整次运行标记失败并推送告警**。
+
+配置方式（两种任选）：
+
+**方式一：一键采集 + gh 直写（推荐）**
+
+WorkBuddy 客户端同一时间只有一个登录账号，因此每个账号按「登录 → 采集」操作一遍：
+
+```bash
+# 客户端登录账号 A 后：
+python scripts/build_tokens_json.py --name 主号
+# 客户端退出登录，换成账号 B 登录后：
+python scripts/build_tokens_json.py --name 小号
+# 重复直到采完，然后一条命令写入 GitHub Secret：
+python scripts/build_tokens_json.py --push --repo <用户名>/<仓库名>
+```
+
+**方式二：手动粘贴**
+
+```bash
+python scripts/build_tokens_json.py --print   # 输出 JSON 数组（含明文 token，仅限本人操作）
+```
+
+把输出粘贴到 Secrets 的 `WORKBUDDY_TOKENS`。JSON 格式支持三种写法：
+
+```json
+[{"name": "主号", "token": "eyJ..."}, {"name": "小号", "token": "eyJ..."}]
+["eyJ...", "eyJ..."]                    // 不起名则自动叫 account1 / account2
+主号:eyJ...                              // 甚至支持按行分隔的纯文本
+```
+
+说明：
+
+- 采集的账号库存在本机 `~/.workbuddy/scripts/wb_tokens.json`（`--list` 查看 / `--remove 名称` 移除）
+- 某个账号 token 过期：客户端重新登录该账号 → 重跑 `--name 同名` 覆盖 → `--push` 更新 Secret
+- 配置了 `WORKBUDDY_TOKENS` 后，旧的 `WORKBUDDY_ACCESS_TOKEN` 单账号 Secret 可留可删（优先用多账号）
+
 ## 通知配置（可选）
 
 在 Secrets 中添加以下任意通道（可同时配置多个）：
@@ -151,6 +190,8 @@ python scripts/sync_token_to_github.py --repo <用户名>/<仓库名>
 ```
 
 脚本会覆盖旧 Secret，无需其他操作。
+
+多账号续期：客户端重新登录过期账号 → `python scripts/build_tokens_json.py --name 该账号名`（同名覆盖）→ `--push` 更新 Secret。
 
 ## 本地自测（可选）
 

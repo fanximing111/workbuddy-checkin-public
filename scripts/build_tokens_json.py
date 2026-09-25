@@ -49,8 +49,14 @@ AUTH_BACKUP_DIR = os.path.join(os.path.expanduser("~"), ".workbuddy", "scripts",
 SECRET_NAME = "WORKBUDDY_TOKENS"
 
 
-def find_auth_file():
+def _auth_filename(variant):
+    """国内版: workbuddy-desktop.info；国际版(AI): workbuddy-desktop-ai.info"""
+    return "workbuddy-desktop-ai.info" if variant == "ai" else "workbuddy-desktop.info"
+
+
+def find_auth_file(variant="cn"):
     """定位当前登录态文件（与 workbuddy_checkin.py 的探测逻辑保持一致）。"""
+    fname = _auth_filename(variant)
     home = os.path.expanduser("~")
     cands = []
     if sys.platform.startswith("win"):
@@ -59,32 +65,33 @@ def find_auth_file():
             if base:
                 cands.append(os.path.join(
                     base, "CodeBuddyExtension", "Data", "Public",
-                    "auth", "workbuddy-desktop.info"))
+                    "auth", fname))
     elif sys.platform == "darwin":
         cands.append(os.path.join(
             home, "Library", "Application Support", "CodeBuddyExtension",
-            "Data", "Public", "auth", "workbuddy-desktop.info"))
+            "Data", "Public", "auth", fname))
     else:
         cands.append(os.path.join(
             home, ".config", "CodeBuddyExtension", "Data", "Public",
-            "auth", "workbuddy-desktop.info"))
-    cands.append(os.path.join(home, ".workbuddy", "auth", "workbuddy-desktop.info"))
+            "auth", fname))
+    cands.append(os.path.join(home, ".workbuddy", "auth", fname))
     for p in cands:
         if p and os.path.isfile(p):
             return p
     return None
 
 
-def load_current_auth():
+def load_current_auth(variant="cn"):
     """读取当前登录账号的 (token, domain)。"""
-    path = find_auth_file()
+    path = find_auth_file(variant)
     if not path:
         return None, None, None
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     auth = data.get("auth", {})
     token = auth.get("accessToken")
-    domain = auth.get("domain") or "www.codebuddy.cn"
+    default_domain = "www.workbuddy.ai" if variant == "ai" else "www.codebuddy.cn"
+    domain = auth.get("domain") or default_domain
     return token, domain, path
 
 
@@ -120,8 +127,8 @@ def build_json(accounts):
     return json.dumps(items, ensure_ascii=False)
 
 
-def cmd_capture(name):
-    token, domain, path = load_current_auth()
+def cmd_capture(name, variant="cn"):
+    token, domain, path = load_current_auth(variant)
     if not token:
         print("✗ 未找到本机登录态文件或未登录，请先在 WorkBuddy 客户端登录要采集的账号")
         sys.exit(1)
@@ -173,9 +180,9 @@ def _name_by_token(token):
     return None
 
 
-def cmd_backup(name):
+def cmd_backup(name, variant="cn"):
     """把当前登录态【整份文件】备份为指定名称（用于客户端免验证码切换）。"""
-    token, domain, path = load_current_auth()
+    token, domain, path = load_current_auth(variant)
     if not path or not token:
         print("✗ 未找到本机登录态文件或未登录，请先登录要备份的账号")
         sys.exit(1)
@@ -189,7 +196,7 @@ def cmd_backup(name):
     print("  完整登录态备份现有 %d 份（--list 查看，--use 名称 一键切换）" % n)
 
 
-def cmd_use(name):
+def cmd_use(name, variant="cn"):
     """把指定账号的完整登录态恢复到客户端（切换账号，免验证码）。
 
     ⚠️ 使用前必须完全退出 WorkBuddy 客户端（托盘图标也要退出），
@@ -204,7 +211,7 @@ def cmd_use(name):
             print("  可用备份：%s" % "、".join(avail))
         print("  先登录该账号后运行 --backup %s 生成备份" % name)
         sys.exit(1)
-    cur_path = find_auth_file()
+    cur_path = find_auth_file(variant)
     if not cur_path:
         print("✗ 未找到客户端登录态文件路径，无法切换")
         sys.exit(1)
@@ -228,7 +235,13 @@ def cmd_current():
         print("✗ 当前未登录或登录态文件缺失")
         sys.exit(1)
     name = _name_by_token(token)
-    label = name if name else "（未知账号，未采集过；--name 或 --backup 采一下）"
+    if name:
+        label = name
+    else:
+        label = ("（未匹配到已采集账号）\n" 
+                 "  可能是：a) 新账号，还没采集过；b) 客户端自动刷新了 token（正常现象）。\n"
+                 "  前者用 --name 或 --backup 采集；后者是已采集账号的话，"
+                 "用 --backup 同名 覆盖刷新即可")
     print("当前客户端登录：%s" % label)
     print("  token %s   domain %s" % (mask(token), domain))
     print("  文件：%s" % path)
@@ -316,6 +329,8 @@ def main():
     ap.add_argument("--use", metavar="名称",
                     help="切换客户端到指定账号（需先完全退出客户端；切换前自动留 _previous 还原点）")
     ap.add_argument("--current", action="store_true", help="显示客户端当前登录的账号")
+    ap.add_argument("--ai", action="store_true",
+                    help="操作国际版 WorkBuddy AI（登录态文件 workbuddy-desktop-ai.info）")
     ap.add_argument("--print", dest="do_print", action="store_true",
                     help="输出 WORKBUDDY_TOKENS JSON（含明文 token）")
     ap.add_argument("--out", help="配合 --print：把 JSON 写入文件而不是打印")
@@ -328,14 +343,15 @@ def main():
     print("WorkBuddy 多账号 token 采集工具")
     print("=" * 56)
 
+    variant = "ai" if getattr(args, "ai", False) else "cn"
     if args.name:
-        cmd_capture(args.name)
+        cmd_capture(args.name, variant)
     elif args.backup:
-        cmd_backup(args.backup)
+        cmd_backup(args.backup, variant)
     elif args.use:
-        cmd_use(args.use)
+        cmd_use(args.use, variant)
     elif args.current:
-        cmd_current()
+        cmd_current(variant)
     elif args.remove:
         cmd_remove(args.remove)
     elif args.push:

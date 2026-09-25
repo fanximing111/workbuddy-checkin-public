@@ -39,6 +39,7 @@ ACTION_LABEL = {
     "clicked": "✅ 签到成功",
     "skip_already_signed": "⏭️ 今日已签到（跳过）",
     "skip_check_only": "🔍 仅查询",
+    "skip_no_active": "⏸️ 无进行中的活动（跳过）",
     "failed": "❌ 签到失败",
 }
 

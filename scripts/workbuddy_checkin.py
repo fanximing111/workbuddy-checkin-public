@@ -603,6 +603,15 @@ def run(check_only, token=None, domain=None, label=None):
                 elif str(st_body.get("code")) == "10001":
                     today_signed = True
 
+            # 活动未开放（如国际版 workbuddy.ai 暂无进行中的签到活动）→ 安静跳过，不算失败
+            data_obj = st_body.get("data") if isinstance(st_body, dict) else None
+            if isinstance(data_obj, dict) and data_obj.get("active") is False \
+                    and not today_signed:
+                result.update(status="ok", action="skip_no_active",
+                              msg="当前无进行中的签到活动，跳过（活动开放后将自动签到）")
+                result["detail"]["today_signed"] = False
+                return result
+
             if check_only:
                 bal_txt = ("，当前积分余额 %s" % result["balance"]) if result.get("balance") is not None else ""
                 result.update(

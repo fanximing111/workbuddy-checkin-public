@@ -228,9 +228,9 @@ def cmd_use(name, variant="cn"):
     print("  ⚠️ 若客户端提示重新登录：登录后运行 --backup %s 刷新这份备份" % name)
 
 
-def cmd_current():
+def cmd_current(variant="cn"):
     """显示客户端当前登录的是哪个账号（按 token 反查已采集的名字）。"""
-    token, domain, path = load_current_auth()
+    token, domain, path = load_current_auth(variant)
     if not token:
         print("✗ 当前未登录或登录态文件缺失")
         sys.exit(1)
